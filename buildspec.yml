@@ -26,5 +26,5 @@ phases:
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
         docker login --username AWS --password-stdin $ECR_NAME
 
-      - docker push ${ECR_NAME}/bsky-feed-bot-lambdat:latest
+      - docker push ${ECR_NAME}/bsky-feed-bot-lambda:latest
       - docker push ${ECR_NAME}/bsky-feed-bot-lambda:${IMAGE_TAG}
