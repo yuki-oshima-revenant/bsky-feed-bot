@@ -1,0 +1,16 @@
+version: 0.2
+
+# from environment variables
+# ECR_NAME=...
+
+phases:
+  pre_build:
+    commands:
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH}
+
+  build:
+    commands:
+      - aws lambda update-function-code
+        --function-name bsky-feed-bot
+        --image-uri ${ECR_NAME}/bsky-feed-bot-lambda:${IMAGE_TAG}
