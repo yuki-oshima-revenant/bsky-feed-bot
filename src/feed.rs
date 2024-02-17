@@ -1,15 +1,67 @@
+use std::collections::HashMap;
+
+use aws_sdk_dynamodb::types::AttributeValue;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use feed_rs::model::Feed;
 use scraper::{Html, Selector};
 
 use crate::OpaqueError;
+
+fn get_string_from_attribute_value_map(
+    map: &HashMap<String, AttributeValue>,
+    key: &str,
+) -> Result<String, OpaqueError> {
+    let value = map
+        .get(key)
+        .ok_or(format!("no {}", key))?
+        .as_s()
+        .map_err(|v| format!("invalid {}, {:?}", key, v))?;
+    Ok(value.clone())
+}
+
+pub struct RegisteredFeed {
+    pub url: String,
+}
+
+pub async fn list_registered_feeds(
+    dynamodb_client: &aws_sdk_dynamodb::Client,
+) -> Result<Vec<RegisteredFeed>, OpaqueError> {
+    let scan_output = dynamodb_client
+        .scan()
+        .table_name("bsky-feed-bot-registered-feeds")
+        .select(aws_sdk_dynamodb::types::Select::AllAttributes)
+        .send()
+        .await?;
+    let items: Vec<HashMap<String, AttributeValue>> = scan_output.items.ok_or("no items")?;
+    let registered_feeds: Vec<RegisteredFeed> = items
+        .iter()
+        .map(|item| {
+            let url = get_string_from_attribute_value_map(item, "url")?;
+            Ok(RegisteredFeed { url })
+        })
+        .collect::<Result<Vec<RegisteredFeed>, OpaqueError>>()?;
+    Ok(registered_feeds)
+}
 
 pub async fn get_feed(feed_url: &str) -> Result<Feed, OpaqueError> {
     let response = reqwest::get(feed_url).await?;
     let bytes = response.bytes().await?;
     let feed = feed_rs::parser::parse(bytes.to_vec().as_slice())?;
     Ok(feed)
+}
+
+pub fn is_date_in_past_range(
+    event_time: DateTime<Utc>,
+    target_time: Option<DateTime<Utc>>,
+    duration: Duration,
+) -> bool {
+    let target_time = match target_time {
+        Some(target_time) => target_time,
+        None => return false,
+    };
+    let start_datetime = event_time - duration;
+    target_time > start_datetime && target_time <= event_time
 }
 
 #[derive(Debug, Clone)]
@@ -19,7 +71,7 @@ pub struct FeedEntry {
     pub published: Option<DateTime<Utc>>,
 }
 
-pub fn extract_entries_info(feed: Feed) -> Vec<FeedEntry> {
+pub fn extract_feed_entries(feed: Feed) -> Vec<FeedEntry> {
     let mut entries = Vec::new();
     for entry in feed.entries {
         if let Some(link) = entry.links.get(0) {
@@ -88,6 +140,20 @@ pub async fn get_og_image(image_url: &str) -> Result<OGImage, OpaqueError> {
     })
 }
 
+pub async fn extract_feed_entry_info(
+    feed_entry: &FeedEntry,
+) -> Result<(Option<OGPInfo>, Option<OGImage>), OpaqueError> {
+    let ogp_info = get_ogp_from_url(&feed_entry.url).await.ok();
+    let og_image = match &ogp_info {
+        Some(OGPInfo {
+            image_url: Some(image_url),
+            ..
+        }) => get_og_image(image_url).await.ok(),
+        _ => None,
+    };
+    Ok((ogp_info, og_image))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_rss_feed() {
         let feed = get_feed("https://zed.dev/blog.rss").await.unwrap();
-        let entries = extract_entries_info(feed);
+        let entries = extract_feed_entries(feed);
         let entry = entries.get(0).unwrap();
         println!("{:?}", entry);
         let ogp_info = get_ogp_from_url(&entry.url).await.unwrap();
@@ -109,7 +175,7 @@ mod tests {
         let feed = get_feed("https://blog.rust-lang.org/feed.xml")
             .await
             .unwrap();
-        let entries = extract_entries_info(feed);
+        let entries = extract_feed_entries(feed);
         let entry = entries.get(0).unwrap();
         println!("{:?}", entry);
         let ogp_info = get_ogp_from_url(&entry.url).await.unwrap();
