@@ -75,6 +75,7 @@ async fn process_feed(
     for feed_entry in target_entries {
         println!("Processing entry: {}", feed_entry.id);
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await?;
+        // todo: resize image
         let upload_blog_response = match og_image {
             Some(og_image) => Some(bsky_client.upload_blob(og_image.image).await?),
             None => None,

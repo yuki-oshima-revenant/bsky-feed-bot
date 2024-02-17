@@ -49,6 +49,7 @@ pub async fn get_ogp_from_url(url: &str) -> Result<OGPInfo, OpaqueError> {
     let response = reqwest::get(url).await?;
     let text = response.text().await?;
     let html = Html::parse_document(&text);
+    // todo: use title tag if og:title is not found
     let title = extract_ogp_info_from_meta_tag(&html, "og:title");
     let image_url = extract_ogp_info_from_meta_tag(&html, "og:image");
     let description = extract_ogp_info_from_meta_tag(&html, "og:description");

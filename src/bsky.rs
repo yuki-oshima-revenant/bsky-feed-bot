@@ -58,6 +58,7 @@ struct EmbedExternal {
     uri: String,
     title: String,
     description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thumb: Option<Blob>,
 }
 
@@ -276,9 +277,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_feed_entry() {
         dotenv().ok();
-        let feed = get_feed("https://blog.rust-lang.org/feed.xml")
-            .await
-            .unwrap();
+        let feed = get_feed("https://blog.jetbrains.com/feed/").await.unwrap();
         let entries = extract_feed_entries(feed);
         let feed_entry = entries.get(0).unwrap();
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await.unwrap();
