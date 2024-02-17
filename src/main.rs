@@ -1,13 +1,14 @@
 use aws_config::BehaviorVersion;
 use aws_lambda_events::eventbridge::EventBridgeEvent;
 use bsky::BskyClient;
-use chrono::{DateTime, Duration, Utc};
-use feed::{extract_feed_entries, extract_feed_entry_info, get_feed, is_date_in_past_range};
+use dynamodb::{list_registered_feeds, FeedRecord};
+use feed::{extract_feed_entries, extract_feed_entry_info, get_feed};
 use lambda_runtime::{service_fn, LambdaEvent};
 
-use crate::feed::list_registered_feeds;
+use crate::dynamodb::update_application_info_in_dynamodb;
 
 mod bsky;
+mod dynamodb;
 mod feed;
 
 pub type OpaqueError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -19,15 +20,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 }
 
 async fn lambda_handler(
-    event: LambdaEvent<EventBridgeEvent<serde_json::Value>>,
+    _: LambdaEvent<EventBridgeEvent<serde_json::Value>>,
 ) -> Result<(), lambda_runtime::Error> {
-    let event_time = match event.payload.time {
-        Some(time) => time,
-        None => {
-            return Err("Event time not found".into());
-        }
-    };
-    match execute(&event_time).await {
+    match execute().await {
         Ok(_) => Ok(()),
         Err(err) => {
             println!("Error: {:?}", err);
@@ -36,15 +31,16 @@ async fn lambda_handler(
     }
 }
 
-async fn execute(event_time: &DateTime<Utc>) -> Result<Vec<()>, OpaqueError> {
+async fn execute() -> Result<Vec<()>, OpaqueError> {
     let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
     let mut bsky_client = bsky::BskyClient::new().await?;
-    let registered_feeds = list_registered_feeds(&dynamodb_client).await?;
+    let feed_records = list_registered_feeds(&dynamodb_client).await?;
     let mut feed_process_results = Vec::new();
     // todo: process feeds concurrently
-    for feed in registered_feeds {
-        let feed_process_result = process_feed(&event_time, &feed.url, &mut bsky_client).await;
+    for feed_record in feed_records {
+        let feed_process_result =
+            process_feed(&feed_record, &mut bsky_client, &dynamodb_client).await;
         feed_process_results.push(feed_process_result);
     }
     let result = feed_process_results
@@ -54,21 +50,30 @@ async fn execute(event_time: &DateTime<Utc>) -> Result<Vec<()>, OpaqueError> {
 }
 
 async fn process_feed(
-    event_time: &DateTime<Utc>,
-    feed_url: &str,
+    feed_record: &FeedRecord,
     bsky_client: &mut BskyClient,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
 ) -> Result<(), OpaqueError> {
-    println!("Processing feed: {}", feed_url);
-    let feed: feed_rs::model::Feed = get_feed(feed_url).await?;
+    println!("Processing feed: {}", feed_record.url);
+    let feed = get_feed(&feed_record.url).await?;
     let entries = extract_feed_entries(feed);
-    for feed_entry in entries {
-        if !is_date_in_past_range(
-            event_time.clone(),
-            feed_entry.published.clone(),
-            Duration::days(1),
-        ) {
-            continue;
+    let mut target_entries = Vec::new();
+    for (index, feed_entry) in entries.iter().enumerate() {
+        if let Some(last_posted_entry_id) = &feed_record.last_posted_entry_id {
+            if feed_entry.id == *last_posted_entry_id {
+                break;
+            }
         }
+        target_entries.push(feed_entry.clone());
+        // last_posted_entry_idが登録されていない場合は最新の1件を投稿する
+        if index == 0 && feed_record.last_posted_entry_id.is_none() {
+            break;
+        }
+    }
+    target_entries.reverse();
+    let mut last_posted_entry_id: Option<String> = feed_record.last_posted_entry_id.clone();
+    for feed_entry in target_entries {
+        println!("Processing entry: {}", feed_entry.id);
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await?;
         let upload_blog_response = match og_image {
             Some(og_image) => Some(bsky_client.upload_blob(og_image.image).await?),
@@ -82,8 +87,17 @@ async fn process_feed(
             )
             .await;
         bsky_client.create_record(create_record_request).await?;
+        last_posted_entry_id = Some(feed_entry.id.clone());
     }
-    println!("Finished processing feed: {}", feed_url);
+    if let Some(last_posted_entry_id) = last_posted_entry_id {
+        update_application_info_in_dynamodb(
+            dynamodb_client,
+            &feed_record.url,
+            &last_posted_entry_id,
+        )
+        .await?;
+    }
+    println!("Finished processing feed: {}", feed_record.url);
     Ok(())
 }
 
@@ -95,9 +109,38 @@ mod tests {
     #[tokio::test]
     async fn test_execute() {
         dotenv().ok();
-        let event_time = DateTime::parse_from_rfc3339("2024-02-08T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        execute(&event_time).await.unwrap();
+        execute().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_feed() {
+        dotenv().ok();
+        let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
+        let mut bsky_client = bsky::BskyClient::new().await.unwrap();
+        let feed_record = FeedRecord {
+            url: "https://blog.rust-lang.org/feed.xml".to_string(),
+            last_posted_entry_id: Some(
+                "https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html".to_string(),
+            ),
+        };
+        process_feed(&feed_record, &mut bsky_client, &dynamodb_client)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_process_feed_no_last_posted_entry_id() {
+        dotenv().ok();
+        let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
+        let mut bsky_client = bsky::BskyClient::new().await.unwrap();
+        let feed_record = FeedRecord {
+            url: "https://blog.rust-lang.org/feed.xml".to_string(),
+            last_posted_entry_id: None,
+        };
+        process_feed(&feed_record, &mut bsky_client, &dynamodb_client)
+            .await
+            .unwrap();
     }
 }
