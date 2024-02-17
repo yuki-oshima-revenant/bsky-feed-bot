@@ -139,25 +139,44 @@ impl BskyClient {
         Ok(())
     }
 
-    pub async fn upload_blob(&self, body: Bytes) -> Result<UploadBlobResponse, OpaqueError> {
+    async fn execute_request_with_refresh_session(
+        &mut self,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, OpaqueError> {
+        let mut response = self
+            .reqwest_client
+            .execute(request.try_clone().ok_or("Failed to clone request")?)
+            .await?
+            .error_for_status()?;
+        if response.status() == 401 {
+            self.refresh_session().await?;
+            response = self
+                .reqwest_client
+                .execute(request)
+                .await?
+                .error_for_status()?;
+        }
+        Ok(response)
+    }
+
+    pub async fn upload_blob(&mut self, body: Bytes) -> Result<UploadBlobResponse, OpaqueError> {
         let mut headers = HeaderMap::new();
         headers.append(header::CONTENT_TYPE, HeaderValue::from_static("*/*"));
         headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
-        let response = self
+        let request = self
             .reqwest_client
             .post("https://bsky.social/xrpc/com.atproto.repo.uploadBlob")
             .bearer_auth(&self.session.access_jwt)
             .headers(headers)
             .body(body)
-            .send()
-            .await?
-            .error_for_status()?;
+            .build()?;
+        let response = self.execute_request_with_refresh_session(request).await?;
         let response_body: UploadBlobResponse = response.json().await?;
         Ok(response_body)
     }
 
     pub async fn create_record(
-        &self,
+        &mut self,
         request: CreateRecordRequest,
     ) -> Result<CreateRecordResponse, OpaqueError> {
         let mut headers = HeaderMap::new();
@@ -166,15 +185,14 @@ impl BskyClient {
             HeaderValue::from_static("application/json"),
         );
         headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
-        let response = self
+        let request = self
             .reqwest_client
             .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
             .bearer_auth(&self.session.access_jwt)
             .headers(headers)
             .body(serde_json::to_string(&request)?)
-            .send()
-            .await?
-            .error_for_status()?;
+            .build()?;
+        let response = self.execute_request_with_refresh_session(request).await?;
         let response_body: CreateRecordResponse = response.json().await?;
         Ok(response_body)
     }
@@ -250,7 +268,7 @@ mod tests {
         let og_image = get_og_image("https://www.rust-lang.org/static/images/rust-social-wide.jpg")
             .await
             .unwrap();
-        let client = BskyClient::new().await.unwrap();
+        let mut client = BskyClient::new().await.unwrap();
         let response = client.upload_blob(og_image.image).await.unwrap();
         println!("{:?}", response);
     }
@@ -264,7 +282,7 @@ mod tests {
         let entries = extract_feed_entries(feed);
         let feed_entry = entries.get(0).unwrap();
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await.unwrap();
-        let bsky_client = BskyClient::new().await.unwrap();
+        let mut bsky_client = BskyClient::new().await.unwrap();
         let upload_blog_response = match og_image {
             Some(og_image) => Some(bsky_client.upload_blob(og_image.image).await.unwrap()),
             None => None,

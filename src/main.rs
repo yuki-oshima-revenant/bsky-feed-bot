@@ -42,6 +42,7 @@ async fn execute(event_time: &DateTime<Utc>) -> Result<Vec<()>, OpaqueError> {
     let mut bsky_client = bsky::BskyClient::new().await?;
     let registered_feeds = list_registered_feeds(&dynamodb_client).await?;
     let mut feed_process_results = Vec::new();
+    // todo: process feeds concurrently
     for feed in registered_feeds {
         let feed_process_result = process_feed(&event_time, &feed.url, &mut bsky_client).await;
         feed_process_results.push(feed_process_result);
