@@ -41,6 +41,7 @@ pub struct Record {
     #[serde(rename = "$type")]
     r#type: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     embed: Option<Embed>,
     created_at: String,
 }
