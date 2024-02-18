@@ -183,16 +183,10 @@ impl BskyClient {
         &mut self,
         image_bytes: Bytes,
     ) -> Result<UploadBlobResponse, OpaqueError> {
-        let image = image::io::Reader::new(Cursor::new(image_bytes))
-            .with_guessed_format()?
-            .decode()?;
-        let resized_image = image.resize(1000, 1000, image::imageops::FilterType::Lanczos3);
-        let mut resized_image_bytes = Vec::new();
-        resized_image.write_to(
-            &mut Cursor::new(&mut resized_image_bytes),
-            image::ImageOutputFormat::Jpeg(100),
-        )?;
-        let resized_image_bytes = Bytes::from(resized_image_bytes);
+        let resized_image_bytes = match resize_thumbnail(&image_bytes) {
+            Ok(resized_image_bytes) => resized_image_bytes,
+            Err(_) => image_bytes,
+        };
         self.upload_blob(resized_image_bytes).await
     }
 
@@ -281,6 +275,20 @@ impl BskyClient {
     }
 }
 
+fn resize_thumbnail(image_bytes: &Bytes) -> Result<Bytes, OpaqueError> {
+    let image = image::io::Reader::new(Cursor::new(image_bytes))
+        .with_guessed_format()?
+        .decode()?;
+    let resized_image = image.resize(1000, 1000, image::imageops::FilterType::Lanczos3);
+    let mut resized_image_bytes = Vec::new();
+    resized_image.write_to(
+        &mut Cursor::new(&mut resized_image_bytes),
+        image::ImageOutputFormat::Jpeg(100),
+    )?;
+    let resized_image_bytes = Bytes::from(resized_image_bytes);
+    Ok(resized_image_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::feed::{extract_feed_entries, extract_feed_entry_info, get_feed, get_og_image};
@@ -351,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_feed_entry() {
         dotenv().ok();
-        let feed = get_feed("https://blog.jetbrains.com/feed/").await.unwrap();
+        let feed = get_feed("https://github.blog/feed/").await.unwrap();
         let entries = extract_feed_entries(&feed);
         let feed_entry = entries.get(0).unwrap();
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await.unwrap();
