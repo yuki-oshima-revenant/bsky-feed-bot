@@ -20,17 +20,18 @@ pub struct FeedEntry {
     pub published: Option<DateTime<Utc>>,
 }
 
-pub fn extract_feed_entries(feed: Feed) -> Vec<FeedEntry> {
+pub fn extract_feed_entries(feed: &Feed) -> Vec<FeedEntry> {
     let mut entries = Vec::new();
-    for entry in feed.entries {
+    for entry in &feed.entries {
         if let Some(link) = entry.links.get(0) {
             let title = entry
                 .title
-                .and_then(|title_element| Some(title_element.content));
+                .as_ref()
+                .and_then(|title_element| Some(&title_element.content));
             entries.push(FeedEntry {
-                id: entry.id,
+                id: entry.id.clone(),
                 url: link.href.clone(),
-                title,
+                title: title.map(|s| s.to_string()),
                 published: entry.published,
             });
         }
@@ -49,7 +50,6 @@ pub async fn get_ogp_from_url(url: &str) -> Result<OGPInfo, OpaqueError> {
     let response = reqwest::get(url).await?;
     let text = response.text().await?;
     let html = Html::parse_document(&text);
-    // todo: use title tag if og:title is not found
     let title = extract_ogp_info_from_meta_tag(&html, "og:title");
     let image_url = extract_ogp_info_from_meta_tag(&html, "og:image");
     let description = extract_ogp_info_from_meta_tag(&html, "og:description");
@@ -112,7 +112,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_rss_feed() {
         let feed = get_feed("https://zed.dev/blog.rss").await.unwrap();
-        let entries = extract_feed_entries(feed);
+        println!("{:?}", feed);
+        let entries = extract_feed_entries(&feed);
         println!("{:?}", entries);
         let entry = entries.get(0).unwrap();
         let ogp_info = get_ogp_from_url(&entry.url).await.unwrap();
@@ -126,7 +127,7 @@ mod tests {
         let feed = get_feed("https://blog.rust-lang.org/feed.xml")
             .await
             .unwrap();
-        let entries = extract_feed_entries(feed);
+        let entries = extract_feed_entries(&feed);
         println!("{:?}", entries);
         let entry = entries.get(0).unwrap();
         let ogp_info = get_ogp_from_url(&entry.url).await.unwrap();

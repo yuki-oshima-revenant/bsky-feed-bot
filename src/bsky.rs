@@ -1,7 +1,8 @@
-use std::env;
+use std::{env, io::Cursor};
 
 use bytes::Bytes;
 use chrono::{SecondsFormat, Utc};
+use feed_rs::model::Feed;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -147,8 +148,7 @@ impl BskyClient {
         let mut response = self
             .reqwest_client
             .execute(request.try_clone().ok_or("Failed to clone request")?)
-            .await?
-            .error_for_status()?;
+            .await?;
         if response.status() == 401 {
             self.refresh_session().await?;
             response = self
@@ -156,11 +156,13 @@ impl BskyClient {
                 .execute(request)
                 .await?
                 .error_for_status()?;
+        } else {
+            response = response.error_for_status()?;
         }
         Ok(response)
     }
 
-    pub async fn upload_blob(&mut self, body: Bytes) -> Result<UploadBlobResponse, OpaqueError> {
+    async fn upload_blob(&mut self, body: Bytes) -> Result<UploadBlobResponse, OpaqueError> {
         let mut headers = HeaderMap::new();
         headers.append(header::CONTENT_TYPE, HeaderValue::from_static("*/*"));
         headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
@@ -174,6 +176,23 @@ impl BskyClient {
         let response = self.execute_request_with_refresh_session(request).await?;
         let response_body: UploadBlobResponse = response.json().await?;
         Ok(response_body)
+    }
+
+    pub async fn upload_thumbnail_with_resizing(
+        &mut self,
+        image_bytes: Bytes,
+    ) -> Result<UploadBlobResponse, OpaqueError> {
+        let image = image::io::Reader::new(Cursor::new(image_bytes))
+            .with_guessed_format()?
+            .decode()?;
+        let resized_image = image.resize(1000, 1000, image::imageops::FilterType::Lanczos3);
+        let mut resized_image_bytes = Vec::new();
+        resized_image.write_to(
+            &mut Cursor::new(&mut resized_image_bytes),
+            image::ImageOutputFormat::Jpeg(100),
+        )?;
+        let resized_image_bytes = Bytes::from(resized_image_bytes);
+        self.upload_blob(resized_image_bytes).await
     }
 
     pub async fn create_record(
@@ -200,31 +219,51 @@ impl BskyClient {
 
     pub async fn format_create_record_request_from_feed_entry(
         &self,
+        feed: &Feed,
         feed_entry: FeedEntry,
         ogp_info: Option<OGPInfo>,
         upload_blob_response: Option<UploadBlobResponse>,
     ) -> CreateRecordRequest {
-        let mut title = match feed_entry.title {
-            Some(entry_title) => entry_title,
+        let mut title = match &feed_entry.title {
+            Some(entry_title) => match &feed.title {
+                Some(feed_title) => format!("{} | {}", entry_title, feed_title.content),
+                None => entry_title.clone(),
+            },
             None => "".to_string(),
         };
         if cfg!(debug_assertions) {
             title = format!("[test]\n{}", title);
         }
         let thumb = match upload_blob_response {
-            Some(upload_blob_response) => Some(upload_blob_response.blob),
+            Some(upload_blob_response) => {
+                if upload_blob_response.blob.size > 1000000 {
+                    None
+                } else {
+                    Some(upload_blob_response.blob)
+                }
+            }
             None => None,
         };
+
         let embed = match ogp_info {
-            Some(ogp_info) => Some(Embed {
-                r#type: "app.bsky.embed.external".to_string(),
-                external: EmbedExternal {
-                    uri: feed_entry.url,
-                    title: ogp_info.title.unwrap_or("".to_string()),
-                    description: ogp_info.description.unwrap_or("".to_string()),
-                    thumb,
-                },
-            }),
+            Some(ogp_info) => {
+                let embed_title = if let Some(ogp_title) = ogp_info.title {
+                    ogp_title
+                } else if let Some(feed_entry_title) = feed_entry.title {
+                    feed_entry_title
+                } else {
+                    "".to_string()
+                };
+                Some(Embed {
+                    r#type: "app.bsky.embed.external".to_string(),
+                    external: EmbedExternal {
+                        uri: feed_entry.url,
+                        title: embed_title,
+                        description: ogp_info.description.unwrap_or("".to_string()),
+                        thumb,
+                    },
+                })
+            }
             None => None,
         };
         let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
@@ -270,24 +309,64 @@ mod tests {
             .await
             .unwrap();
         let mut client = BskyClient::new().await.unwrap();
-        let response = client.upload_blob(og_image.image).await.unwrap();
+        let response = client
+            .upload_thumbnail_with_resizing(og_image.image)
+            .await
+            .unwrap();
         println!("{:?}", response);
+    }
+
+    #[tokio::test]
+    async fn test_create_record_request() {
+        dotenv().ok();
+        let feed = get_feed("https://this-week-in-rust.org/atom.xml")
+            .await
+            .unwrap();
+        let entries = extract_feed_entries(&feed);
+        let feed_entry = entries.get(0).unwrap();
+        let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await.unwrap();
+        let mut bsky_client = BskyClient::new().await.unwrap();
+        let upload_blog_response = match og_image {
+            Some(og_image) => Some(
+                bsky_client
+                    .upload_thumbnail_with_resizing(og_image.image)
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        };
+        println!("{:?}", upload_blog_response);
+        let create_record_request = bsky_client
+            .format_create_record_request_from_feed_entry(
+                &feed,
+                feed_entry.clone(),
+                ogp_info,
+                upload_blog_response,
+            )
+            .await;
+        println!("{:?}", create_record_request);
     }
 
     #[tokio::test]
     async fn test_post_feed_entry() {
         dotenv().ok();
         let feed = get_feed("https://blog.jetbrains.com/feed/").await.unwrap();
-        let entries = extract_feed_entries(feed);
+        let entries = extract_feed_entries(&feed);
         let feed_entry = entries.get(0).unwrap();
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await.unwrap();
         let mut bsky_client = BskyClient::new().await.unwrap();
         let upload_blog_response = match og_image {
-            Some(og_image) => Some(bsky_client.upload_blob(og_image.image).await.unwrap()),
+            Some(og_image) => Some(
+                bsky_client
+                    .upload_thumbnail_with_resizing(og_image.image)
+                    .await
+                    .unwrap(),
+            ),
             None => None,
         };
         let create_record_request = bsky_client
             .format_create_record_request_from_feed_entry(
+                &feed,
                 feed_entry.clone(),
                 ogp_info,
                 upload_blog_response,

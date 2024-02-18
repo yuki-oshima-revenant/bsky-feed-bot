@@ -56,7 +56,7 @@ async fn process_feed(
 ) -> Result<(), OpaqueError> {
     println!("Processing feed: {}", feed_record.url);
     let feed = get_feed(&feed_record.url).await?;
-    let entries = extract_feed_entries(feed);
+    let entries = extract_feed_entries(&feed);
     let mut target_entries = Vec::new();
     for (index, feed_entry) in entries.iter().enumerate() {
         if let Some(last_posted_entry_id) = &feed_record.last_posted_entry_id {
@@ -75,13 +75,17 @@ async fn process_feed(
     for feed_entry in target_entries {
         println!("Processing entry: {}", feed_entry.id);
         let (ogp_info, og_image) = extract_feed_entry_info(&feed_entry).await?;
-        // todo: resize image
         let upload_blog_response = match og_image {
-            Some(og_image) => Some(bsky_client.upload_blob(og_image.image).await?),
+            Some(og_image) => Some(
+                bsky_client
+                    .upload_thumbnail_with_resizing(og_image.image)
+                    .await?,
+            ),
             None => None,
         };
         let create_record_request = bsky_client
             .format_create_record_request_from_feed_entry(
+                &feed,
                 feed_entry.clone(),
                 ogp_info,
                 upload_blog_response,
