@@ -14,3 +14,7 @@ phases:
       - aws lambda update-function-code
         --function-name bsky-feed-bot
         --image-uri ${ECR_NAME}/bsky-feed-bot-lambda:${IMAGE_TAG}
+
+      - aws lambda update-function-code
+        --function-name test
+        --image-uri ${ECR_NAME}/test:${IMAGE_TAG}
