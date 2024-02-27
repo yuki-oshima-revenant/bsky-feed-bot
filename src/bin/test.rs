@@ -8,7 +8,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 }
 
 async fn lambda_handler(
-    _: LambdaEvent<EventBridgeEvent<serde_json::Value>>,
+    event: LambdaEvent<EventBridgeEvent<serde_json::Value>>,
 ) -> Result<(), lambda_runtime::Error> {
+    println!("{:?}", event.payload.time);
     Ok(())
 }
