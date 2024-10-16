@@ -5,7 +5,7 @@ use dynamodb::{list_registered_feeds, FeedRecord};
 use feed::{extract_feed_entries, extract_feed_entry_info, get_feed};
 use lambda_runtime::{service_fn, LambdaEvent};
 
-use crate::dynamodb::update_application_info_in_dynamodb;
+use crate::dynamodb::update_feed_last_posted_entry_id;
 
 mod bsky;
 mod dynamodb;
@@ -69,6 +69,10 @@ async fn process_feed(
         if index == 0 && feed_record.last_posted_entry_id.is_none() {
             break;
         }
+        // 全件投稿してしまうのを防ぐために10件までに制限する
+        if target_entries.len() >= 10 {
+            break;
+        }
     }
     target_entries.reverse();
     let mut last_posted_entry_id: Option<String> = feed_record.last_posted_entry_id.clone();
@@ -95,12 +99,9 @@ async fn process_feed(
         last_posted_entry_id = Some(feed_entry.id.clone());
     }
     if let Some(last_posted_entry_id) = last_posted_entry_id {
-        update_application_info_in_dynamodb(
-            dynamodb_client,
-            &feed_record.url,
-            &last_posted_entry_id,
-        )
-        .await?;
+        update_feed_last_posted_entry_id(dynamodb_client, &feed_record.url, &last_posted_entry_id)
+            .await?;
+        println!("last_posted_entry_id: {}", last_posted_entry_id);
     }
     println!("Finished processing feed: {}", feed_record.url);
     Ok(())

@@ -56,7 +56,7 @@ pub async fn list_registered_feeds(
     Ok(registered_feeds)
 }
 
-pub async fn update_application_info_in_dynamodb(
+pub async fn update_feed_last_posted_entry_id(
     dynamodb_client: &aws_sdk_dynamodb::Client,
     feed_url: &str,
     last_posted_entry_id: &str,
